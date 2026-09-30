@@ -174,9 +174,9 @@ void writeHeader(FILE *f, const TTDBHeader &h)
 {
     fwrite(h.magic, 1, 4, f);
     fwrite(&h.version, sizeof(int32_t), 1, f);
+    // placeholder for other two data members
     fwrite(&h.stepCount, sizeof(int32_t), 1, f);
     fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
-    // placeholder for other two data members
 }
 
 // resolve.bin - bookkeeping
@@ -196,18 +196,55 @@ struct PendingPatch
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream &in, string &out)
 {
+    int size = 0;
+    if (in.read((char*)&size, sizeof(int))) {
+        out.resize(size);
+        in.read(out.data(), size);
+        return true;
+    }
+    return false;
     // reads the next nonblank line
 }
 string firstWord(const string &line)
 {
+    size_t idx = line.find_first_of(' ');
+    if (idx == string::npos)
+        return line;
+    return line.substr(0, idx);
     // returns first word from the input string
 }
 string secondWord(const string &line)
 {
+    size_t first = line.find_first_of(' ');
+    if (first == string::npos)
+        return "";
+    size_t last =  line.find_first_of(' ',first+1);
+    if (last == string::npos)
+        return line.substr(first + 1);
+    return line.substr(first+1, last-first-1);
     // returns the second word
 }
 bool validateProgram(const char *sourcePath)
 {
+    //using stack here, but I think using a bool is better
+    ifstream fin(sourcePath, ios::binary);
+    string line;
+    Stack<string> func_stack;
+    while (readSourceLine(fin, line)) {
+        if (firstWord(line) == "func") {
+            if (!func_stack.isEmpty())
+                return false;
+            else
+                func_stack.push("func" + secondWord(line));
+        }
+        else if (firstWord(line) == "func_end") {
+            if (func_stack.isEmpty())
+                return false;
+            else
+                func_stack.pop();
+        }
+    }
+    return func_stack.isEmpty();
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 
 }
 
