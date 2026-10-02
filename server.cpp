@@ -12,6 +12,7 @@
 #include <string>
 #include <cstdint>
 #include <fstream>
+#include <stdexcept>
 //#include <unistd.h>
 //#include <sys/socket.h>
 #include <cstdint>
@@ -37,17 +38,24 @@ class Stack
     struct Node
     {
         T data;
-        Node *next;
+        Node* next;
     };
-    Node *top;
+    Node* top;
     int32_t count;
 
 public:
     // Implement these functions:
-    Stack() : top{nullptr}, count{0}
+    Stack() : top{ nullptr }, count{ 0 }
     { // initialize the stack
     }
-    void push(const T &val)
+    ~Stack() { 
+        while (top != nullptr) {
+            Node* temp = top;
+            top = top->next;
+            delete temp;
+        }
+    } // this was missing in original document
+    void push(const T& val)
     {
         if (count < MAX_FUNCS) {
             Node* temp = new Node{ val,top };
@@ -72,7 +80,7 @@ public:
         return val;
         // pop the top value on the stack
     }
-    T &peek()
+    T& peek()
     {
         return top->data;
         // returns the top value on the stack
@@ -89,7 +97,7 @@ public:
     {
         Node* temp = top;
         int ct = 0;
-        while (temp != nullptr && ct<maxLen) {
+        while (temp != nullptr && ct < maxLen) {
             out[ct++] = temp->data;
             temp = temp->next;
         }
@@ -104,21 +112,21 @@ public:
 struct Snapshot; // fwd declaration;
 struct TimelineNode
 {
-    Snapshot *data;
-    TimelineNode *next;
-    TimelineNode *prev;
+    Snapshot* data;
+    TimelineNode* next;
+    TimelineNode* prev;
 };
 class Timeline
 {
-    TimelineNode *head, *tail;
+    TimelineNode* head, * tail;
     int32_t stepCount;
 
 public:
     // Implement these functions
-    Timeline() : head{nullptr}, tail{nullptr}, stepCount{0}
+    Timeline() : head{ nullptr }, tail{ nullptr }, stepCount{ 0 }
     {
     }
-    void record(Snapshot *s)
+    void record(Snapshot* s)
     {
         TimelineNode* temp = new TimelineNode{ s,nullptr,nullptr };
         if (head == nullptr) {
@@ -133,7 +141,7 @@ public:
         stepCount++;
         // add record in the timeline
     }
-    TimelineNode *begin()
+    TimelineNode* begin()
     {
         return head;
     }
@@ -170,7 +178,7 @@ struct TTDBHeader
     int32_t stepCount;
     int64_t indexOffset;
 };
-void writeHeader(FILE *f, const TTDBHeader &h)
+void writeHeader(FILE* f, const TTDBHeader& h)
 {
     fwrite(h.magic, 1, 4, f);
     fwrite(&h.version, sizeof(int32_t), 1, f);
@@ -194,18 +202,22 @@ struct PendingPatch
 
 
 // PASS 0x0: READING source.bin + VALIDITY CHECK
-bool readSourceLine(ifstream &in, string &out)
+bool readSourceLine(ifstream& in, string& out)
 {
     int size = 0;
-    if (in.read((char*)&size, sizeof(int))) {
-        out.resize(size);
-        in.read(out.data(), size);
-        return true;
+    while (in.read((char*)&size, sizeof(int))) {
+        if (size < 0)
+            return false;
+        if (size > 0) {
+            out.resize(size);
+            in.read(out.data(), size);
+            return true;
+        }
     }
     return false;
     // reads the next nonblank line
-}
-string firstWord(const string &line)
+} //this may cause issues in acse of \n
+string firstWord(const string& line)
 {
     size_t idx = line.find_first_of(' ');
     if (idx == string::npos)
@@ -213,18 +225,18 @@ string firstWord(const string &line)
     return line.substr(0, idx);
     // returns first word from the input string
 }
-string secondWord(const string &line)
+string secondWord(const string& line)
 {
     size_t first = line.find_first_of(' ');
     if (first == string::npos)
         return "";
-    size_t last =  line.find_first_of(' ',first+1);
+    size_t last = line.find_first_of(' ', first + 1);
     if (last == string::npos)
         return line.substr(first + 1);
-    return line.substr(first+1, last-first-1);
+    return line.substr(first + 1, last - first - 1);
     // returns the second word
 }
-bool validateProgram(const char *sourcePath)
+bool validateProgram(const char* sourcePath)
 {
     //using stack here, but I think using a bool is better
     ifstream fin(sourcePath, ios::binary);
@@ -249,21 +261,96 @@ bool validateProgram(const char *sourcePath)
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin
-int64_t writeResolveRecord(FILE *f, int64_t offsetField, const string &text)
+int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
+    int size = text.size();
+    fwrite(&offsetField, sizeof(int64_t), 1, f);
+    fwrite(&size, sizeof(int), 1, f);
+    fwrite(text.data(), sizeof(char), size, f);
+    return offsetField;
     // writes one [offset(8B)][size(4B)][string] record at the current file position
     // returns this record's own starting byte position
 }
-int64_t readResolveRecord(FILE *f, string &outText)
+int64_t readResolveRecord(FILE* f, string& outText)
 {
+    int64_t offset = 0;
+    int size = 0;
+    fread(&offset, sizeof(int64_t), 1, f);
+    fread(&size, sizeof(int), 1, f);
+    outText.resize(size);
+    fread(outText.data(), sizeof(char), size, f);
+    return offset;
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
 }
-int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
+int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 {
     FuncEntry funcArray[MAX_FUNCS];
     int32_t funcCount = 0;
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
+
+    int64_t main_offset = -1;
+
+    ifstream fin(sourcePath, ios::binary);
+    FILE* fout = fopen(resolveBinPath, "wb");
+    string line;
+    int64_t offset = 0;
+
+
+    while (readSourceLine(fin, line)) {
+        string func_name = secondWord(line);
+        if (firstWord(line) == "func") {
+            if (funcCount == MAX_FUNCS)
+                throw runtime_error("Maximum functions limit exceded");
+
+            for (int i = 0; i < funcCount; i++)
+                if (funcArray[i].funcName == func_name)
+                    throw runtime_error("Function: " + func_name + " already defined earlier");
+
+            if (func_name == "main")
+                main_offset = offset;
+
+            funcArray[funcCount++] = FuncEntry{ func_name, offset };
+        }
+        else if (firstWord(line) == "call") {
+            if (patchCount == MAX_PATCHES)
+                throw runtime_error("Maximum patch limit exceded");
+
+            patches[patchCount++] = PendingPatch{ offset + 8 + 4 + 5, func_name };
+            // 8 bytes for offset, 4 for size, 5 for 'call '
+            line = "call 00000000" + line.substr(5 + func_name.size());
+        }
+        writeResolveRecord(fout, offset, line);
+        offset = offset + 8 + 4 + line.size();
+    }
+    fin.close();
+    fclose(fout);
+
+    //Patching functions
+    FILE* fout_res = fopen(resolveBinPath, "r+b");
+    for (int i = 0; i < patchCount; i++) { //checking for undefined function calls
+        string func_name = patches[i].targetFuncName;
+        bool func_found = false;
+        for (int j = 0; j < funcCount; j++) {
+            if (funcArray[j].funcName == func_name) {
+                func_found = true;
+                fseek(fout_res, patches[i].byteOffsetOfOffsetField, 0);
+                string temp = to_string(funcArray[j].byteOffsetInResolveBin);
+                temp = string(8 - temp.size(), '0') + temp;
+                fwrite(temp.data(), sizeof(char), 8, fout_res);
+                break;
+            }
+        }
+        if (!func_found) {
+            throw runtime_error("Called an undefined function " + func_name);
+        }
+    }
+    fclose(fout_res);
+
+
+    if (main_offset == -1)
+        throw runtime_error("main() not found");
+    return main_offset;
     // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
@@ -286,18 +373,18 @@ struct Token
     TokenType type;
     string text;
 };
-int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
+int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
     // first word is always a instruction keyword
     // instruction set = [func, func_end, call, set, add, sub, mul and div]
     // next word is identifier like name of a function, variable name
     // after identifier all are the params/arg, space separated
 }
-Snapshot *buildSnapshot(Stack<Frame> &callStack)
+Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
     // build the snapshot based on the callStack given
 }
-void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &timeline)
+void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
     // initialize the call stack
     // make the main frame
@@ -308,7 +395,7 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
 }
 
 // PASS 0x3: SERIALIZE TIMELINE
-void writeTdbg(Timeline &timeline, const char *tdbgPath)
+void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
     // placeholder for header
     // index array of the size of stepcount from the timeline
