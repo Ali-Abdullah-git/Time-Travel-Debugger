@@ -17,6 +17,7 @@
 //#include <sys/socket.h>
 #include <cstdint>
 #include <cstdio>
+#include<vector>
 using namespace std;
 
 // ---- Constants ----
@@ -57,7 +58,7 @@ public:
     } // this was missing in original document
     void push(const T& val)
     {
-        if (count < MAX_FUNCS) {
+        if (count < MAX_STACK_DEPTH) {
             Node* temp = new Node{ val,top };
             top = temp;
             count++;
@@ -216,7 +217,7 @@ bool readSourceLine(ifstream& in, string& out)
     }
     return false;
     // reads the next nonblank line
-} //this may cause issues in acse of \n
+}
 string firstWord(const string& line)
 {
     size_t idx = line.find_first_of(' ');
@@ -295,11 +296,21 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     FILE* fout = fopen(resolveBinPath, "wb");
     string line;
     int64_t offset = 0;
-
+    vector<string> keywords{"func", "func_end", "call", "set", "add", "mul", "sub", "div"};
+    string keyword, func_name;
 
     while (readSourceLine(fin, line)) {
-        string func_name = secondWord(line);
-        if (firstWord(line) == "func") {
+        keyword = firstWord(line);
+        bool flag = false;
+        for (const string& key : keywords)
+            if (key == keyword) {
+                flag = true;
+                break;
+            }
+        if (!flag)
+            throw runtime_error("Invalid keyword '" + keyword + "' used");
+        func_name = secondWord(line);
+        if (keyword == "func") {
             if (funcCount == MAX_FUNCS)
                 throw runtime_error("Maximum functions limit exceded");
 
@@ -312,7 +323,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 
             funcArray[funcCount++] = FuncEntry{ func_name, offset };
         }
-        else if (firstWord(line) == "call") {
+        else if (keyword == "call") {
             if (patchCount == MAX_PATCHES)
                 throw runtime_error("Maximum patch limit exceded");
 
@@ -375,6 +386,29 @@ struct Token
 };
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
+    int32_t ct = 0;
+    size_t idx = 0, max_idx = line.size() - 1;
+    while (idx <= max_idx) {
+        while (line[idx] == ' ')
+            idx++;
+        if (idx > max_idx)
+            break;
+        if (ct == maxTokens)
+            throw runtime_error("Maximum token limit exceeded in line: " + line);
+        size_t start = idx;
+        while (line[j] != ' ')
+            j++;
+        tokens[ct].text = line.substr(idx, start - idx);
+        if (ct == 0)
+            tokens[ct].type = KEYWORD;
+        else if (ct == 1)
+            tokens[ct].type = IDENTIFIER;
+        else
+            tokens[ct].type = PARAM;
+        ct++;
+        idx = start;
+    }
+    return ct;
     // first word is always a instruction keyword
     // instruction set = [func, func_end, call, set, add, sub, mul and div]
     // next word is identifier like name of a function, variable name
@@ -382,10 +416,133 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 }
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
+    Snapshot* snapshot = new Snapshot();
+    snapshot->stackDepth = callStack.snapshot_into(snapshot->callStack, MAX_STACK_DEPTH);
+    return snapshot;
     // build the snapshot based on the callStack given
+}
+bool isNum(const string& text) {
+    if (text.empty())
+        return false;
+    size_t idx = 0, max = text.size();
+
+    while (idx < max)
+        if (!(text[idx] >= '0' && text[idx] <= '9') && !(idx == 0 && text[idx] == '-'))
+            return false;
+    return true;
+}
+Variable* getvariable(Frame& f, const string& text) {
+    for (int i = 0; i < f.argc; i++)
+        if (f.argv[i].name == text)
+            return &f.argv[i];
+    for (int i = 0; i < f.localCount; i++)
+        if (f.locals[i].name == text)
+            return &f.locals[i];
+    return nullptr;
+}
+int getValue(Frame& f, const string& text) {
+    if (isNum(text))
+        return stoi(text);
+    Variable* var = getVariable(f, text);
+    if (v != nullptr)
+        return var->value;
+    throw runtime_error("Undefined variable " + text);
 }
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
+    FILE* fin = fopen(resolveBinPath, "rb");
+    fseek(fin, mainOffset, 0);
+    Stack<Frame> callStack;
+    vector<string> references[MAX_STACK_DEPTH];
+    string line;
+    int32_t number_of_tokens = 0;
+    Token tokens[MAX_TOKENS];
+
+    readResolveRecord(fin, line);
+    Frame main;
+    main.name = "main";
+    main.returnLine = -1;
+    callStack.push(main);
+
+    while (!callStack.isEmpty()) {
+        readResolveRecord(fin, line);
+        number_of_tokens = tokenizeLine(line, tokens, MAX_TOKENS);
+        
+        string& keyword = tokens[0].text;
+        Frame& current_frame = callStack.peek();
+
+        if (keyword == "set" || keyword == "add" || keyword == "sub" || keyword == "mul" || keyword = "div") {
+            if (number_of_tokens != 3)
+                throw runtime_error("Invalid line structure in : " + line);
+            int val = getValue(current_frame, tokens[2].text);
+            Variable* var = getVariable(current_frame, tokens[1].text);
+
+            if (keyword == "set") {
+                if (var == nullptr) {
+                    var = &curr.locals[curr.localCount++];
+                    var->name = tokens[1].text;
+                }
+                var->value = val;
+            }
+            else {
+                if (var == nullptr)
+                    throw runtime_error("Undefined Variable: " + tokens[1].text + " used in line: " + line);
+                if (keyword == "add")
+                    var->value += val;
+                else if (keyword == "sub")
+                    var->value -= val;
+                else if (keyword == "mul")
+                    var->value *= val;
+                else if (val != 0)
+                    var->value /= val;
+                else
+                    throw runtime_error("Division by zero error");
+            }
+        }
+        else if (keyword == "call") {
+            if (number_of_tokens == 1)
+                throw runtime_error("Did not specify which function to call");
+            int32_t return_offset = ftell(fin);
+            fseek(fin, stoll(tokens[1].text), 0);
+            string header;
+            readResolveRecord(fin, header);
+            Token ht[MAX_TOKENS];
+            int32_t ht_count = tokenizeLine(header, ht, MAX_TOKENS);
+            if (ht_count != number_of_tokens)
+                throw runtime_error("Argument count mismatch calling " + ht[1].text);
+            Frame next_frame{};
+            next_frame.func_name = ht[1].text;
+            next_frame.argc = ht_count - 2;
+            next_frame.returnLine = return_offset;
+            vector<string> ref;
+            for (int i = 0; i < next_frame.argc; i++) {
+                next_frame.argv[i].name = ht[i + 2].text;
+                next_frame.argv[i].value = getValue(current_frame, tokens[i + 2].text);
+                ref.push_back(tokens[i + 2].text);
+            }
+            references[callStack.depth()] = ref;
+            callStack.push(next_frame);
+        }
+        else if (keyword == "func_end") {
+            int32_t depth = callStack.depth() - 1;
+            Frame exited_frame = callStack.pop();
+            if (!callStack.isEmpty()) {
+                Frame& caller = callStack.peek();
+                for (int i = 0; i < exited_frame.argc; i++) {
+                    Variable* var = getVariable(caller, refs[depth][i]);
+                    if (var)
+                        var->value = exited_frame.argv[i].value;
+                }
+                fseek(fin, exited_frame.returnLine, 0);
+            }
+        }
+        else
+            throw runtime_error("Invalid instruction: " + keyword + " in line: " + line);
+
+        //build snapshot and record to timeline
+    }
+
+    fclose(fin);
     // initialize the call stack
     // make the main frame
     // push main frame on the call stack
