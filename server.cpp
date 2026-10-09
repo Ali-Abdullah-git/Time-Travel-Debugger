@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 // ======================= TIME-TRAVEL DEBUGGER - SERVER TEMPLATE =======================
 
 // Pipeline this file implements, top to bottom:
@@ -6,7 +7,6 @@
 //   2. Pass 0X1   -- resolve(): copy EVERY source line into resolve.bin as [offset][size][string], then patch CALL targets.
 //   3. Pass 0X2   -- execute resolve.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
 //   4. Pass 0X3   -- serialize Timeline -> session.tdbg(header + snapshot records + dense index)
-
 
 #include <iostream>
 #include <string>
@@ -49,7 +49,7 @@ public:
     Stack() : top{ nullptr }, count{ 0 }
     { // initialize the stack
     }
-    ~Stack() { 
+    ~Stack() {
         while (top != nullptr) {
             Node* temp = top;
             top = top->next;
@@ -296,7 +296,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     FILE* fout = fopen(resolveBinPath, "wb");
     string line;
     int64_t offset = 0;
-    vector<string> keywords{"func", "func_end", "call", "set", "add", "mul", "sub", "div"};
+    vector<string> keywords{ "func", "func_end", "call", "set", "add", "mul", "sub", "div" };
     string keyword, func_name;
 
     while (readSourceLine(fin, line)) {
@@ -387,18 +387,18 @@ struct Token
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
     int32_t ct = 0;
-    size_t idx = 0, max_idx = line.size() - 1;
-    while (idx <= max_idx) {
-        while (line[idx] == ' ')
+    size_t idx = 0, size = line.size();
+    while (idx < size) {
+        while (idx < size && line[idx] == ' ')
             idx++;
-        if (idx > max_idx)
+        if (idx >= size)
             break;
         if (ct == maxTokens)
             throw runtime_error("Maximum token limit exceeded in line: " + line);
         size_t start = idx;
-        while (line[j] != ' ')
-            j++;
-        tokens[ct].text = line.substr(idx, start - idx);
+        while (idx < size && line[idx] != ' ')
+            idx++;
+        tokens[ct].text = line.substr(start, idx - start);
         if (ct == 0)
             tokens[ct].type = KEYWORD;
         else if (ct == 1)
@@ -406,7 +406,6 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
         else
             tokens[ct].type = PARAM;
         ct++;
-        idx = start;
     }
     return ct;
     // first word is always a instruction keyword
@@ -424,14 +423,14 @@ Snapshot* buildSnapshot(Stack<Frame>& callStack)
 bool isNum(const string& text) {
     if (text.empty())
         return false;
-    size_t idx = 0, max = text.size();
+    size_t idx = -1, max = text.size();
 
-    while (idx < max)
-        if (!(text[idx] >= '0' && text[idx] <= '9') && !(idx == 0 && text[idx] == '-'))
+    while (++idx < max)
+        if (!(text[idx] >= '0' && text[idx] <= '9') && !(idx == 0 && text[idx] == '-' && idx < max - 1))
             return false;
     return true;
 }
-Variable* getvariable(Frame& f, const string& text) {
+Variable* getVariable(Frame& f, const string& text) {
     for (int i = 0; i < f.argc; i++)
         if (f.argv[i].name == text)
             return &f.argv[i];
@@ -444,7 +443,7 @@ int getValue(Frame& f, const string& text) {
     if (isNum(text))
         return stoi(text);
     Variable* var = getVariable(f, text);
-    if (v != nullptr)
+    if (var != nullptr)
         return var->value;
     throw runtime_error("Undefined variable " + text);
 }
@@ -459,19 +458,19 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     Token tokens[MAX_TOKENS];
 
     readResolveRecord(fin, line);
-    Frame main;
-    main.name = "main";
+    Frame main{};
+    main.func_name = "main";
     main.returnLine = -1;
     callStack.push(main);
 
     while (!callStack.isEmpty()) {
         readResolveRecord(fin, line);
         number_of_tokens = tokenizeLine(line, tokens, MAX_TOKENS);
-        
+
         string& keyword = tokens[0].text;
         Frame& current_frame = callStack.peek();
 
-        if (keyword == "set" || keyword == "add" || keyword == "sub" || keyword == "mul" || keyword = "div") {
+        if (keyword == "set" || keyword == "add" || keyword == "sub" || keyword == "mul" || keyword == "div") {
             if (number_of_tokens != 3)
                 throw runtime_error("Invalid line structure in : " + line);
             int val = getValue(current_frame, tokens[2].text);
@@ -479,7 +478,10 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
             if (keyword == "set") {
                 if (var == nullptr) {
-                    var = &curr.locals[curr.localCount++];
+                    if (current_frame.localCount == MAX_VARS_PER_FRAME) {
+                        throw runtime_error("Maximum local variable limit exceeded in function: " + current_frame.func_name);
+                    }
+                    var = &current_frame.locals[current_frame.localCount++];
                     var->name = tokens[1].text;
                 }
                 var->value = val;
@@ -520,8 +522,8 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 next_frame.argv[i].value = getValue(current_frame, tokens[i + 2].text);
                 ref.push_back(tokens[i + 2].text);
             }
-            references[callStack.depth()] = ref;
             callStack.push(next_frame);
+            references[callStack.depth() - 1] = ref;
         }
         else if (keyword == "func_end") {
             int32_t depth = callStack.depth() - 1;
@@ -529,7 +531,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             if (!callStack.isEmpty()) {
                 Frame& caller = callStack.peek();
                 for (int i = 0; i < exited_frame.argc; i++) {
-                    Variable* var = getVariable(caller, refs[depth][i]);
+                    Variable* var = getVariable(caller, references[depth][i]);
                     if (var)
                         var->value = exited_frame.argv[i].value;
                 }
@@ -540,6 +542,8 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             throw runtime_error("Invalid instruction: " + keyword + " in line: " + line);
 
         //build snapshot and record to timeline
+        if (!callStack.isEmpty())
+            timeline.record(buildSnapshot(callStack));
     }
 
     fclose(fin);
@@ -552,8 +556,46 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 }
 
 // PASS 0x3: SERIALIZE TIMELINE
+void writeString(FILE* f, const string& str) {
+    int32_t size = str.size();
+    fwrite(&size, sizeof(int32_t), 1, f);
+    fwrite(str.data(), sizeof(char), size, f);
+}
+void writeVariable(FILE* f, const Variable vars[], int32_t ct) {
+    for (int i = 0; i < ct; i++) {
+        writeString(f, vars[i].name);
+        fwrite(&(vars[i].value), sizeof(int32_t), 1, f);
+    }
+}
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
+    FILE* tdbg = fopen(tdbgPath, "wb");
+    if (!tdbg)
+        throw runtime_error("Could not open TDBG file");
+    TTDBHeader tdbgHeader{ {'T','T','D','B'}, 1, timeline.getStepCount(), 0 };
+    writeHeader(tdbg, tdbgHeader);
+
+    vector<int64_t> index;
+    for (TimelineNode* ptr = timeline.begin(); ptr != nullptr; ptr = ptr->next) {
+        index.push_back(ftell(tdbg));
+        Snapshot* snp = ptr->data;
+        fwrite(&snp->stackDepth, sizeof(int32_t), 1, tdbg);
+        for (int i = 0; i < snp->stackDepth; i++) {
+            Frame* frame = &snp->callStack[i];
+            writeString(tdbg, frame->func_name);
+            fwrite(&frame->argc, sizeof(int32_t), 1, tdbg);
+            writeVariable(tdbg, frame->argv, frame->argc);
+            fwrite(&frame->returnLine, sizeof(int32_t), 1, tdbg);
+            fwrite(&frame->localCount, sizeof(int32_t), 1, tdbg);
+            writeVariable(tdbg, frame->locals, frame->localCount);
+        }
+    }
+    tdbgHeader.indexOffset = ftell(tdbg);
+    fwrite(index.data(), sizeof(int64_t), index.size(), tdbg);
+    fseek(tdbg, 0, 0);
+    writeHeader(tdbg, tdbgHeader);
+    fclose(tdbg);
+
     // placeholder for header
     // index array of the size of stepcount from the timeline
     // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
@@ -563,19 +605,23 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
 // main section
 int32_t main()
 {
+    try {
+        if (!validateProgram("source.bin"))
+        {
+            // send an error response instead of a .tdbg file
+            return 1;
+        }
 
-    if (!validateProgram("source.bin"))
-    {
-        // send an error response instead of a .tdbg file
+        int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
+
+        Timeline timeline;
+        executeProgram("resolve.bin", mainOffset, timeline);
+
+        writeTdbg(timeline, "session.tdbg");
+    }
+    catch (exception& e) {
+        cerr << "Error : " << e.what();
         return 1;
     }
-
-    int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-
-    Timeline timeline;
-    executeProgram("resolve.bin", mainOffset, timeline);
-
-    writeTdbg(timeline, "session.tdbg");
-
     return 0;
 }
