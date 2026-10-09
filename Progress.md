@@ -16,4 +16,11 @@ October 7 2026:
 
             Goal for tommorow: Complete Phase 1 i.e complete serialization and main()
                         
+October 9 2026:
 
+            Complted Stage 4 Pass 0x3 Serialize Timeline
+            Complted writetdbg() and added some helper functions: writeString() and writeVariable() 
+            Executed the code and resolved compiler errors
+            Added try catch to main()
+
+            Next goal: write a function to display the .tdbg file 
