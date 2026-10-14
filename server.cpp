@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <fstream>
 #include <stdexcept>
+#include <cctype>
 //#include <unistd.h>
 //#include <sys/socket.h>
 #include <cstdint>
@@ -293,6 +294,8 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     int64_t main_offset = -1;
 
     ifstream fin(sourcePath, ios::binary);
+    if (!fin)
+        throw runtime_error("Can not open source.bin");
     FILE* fout = fopen(resolveBinPath, "wb");
     string line;
     int64_t offset = 0;
@@ -314,6 +317,10 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
             if (funcCount == MAX_FUNCS)
                 throw runtime_error("Maximum functions limit exceded");
 
+            if (func_name.empty() || !isalpha(func_name[0])) {
+                throw runtime_error("Illegal Function name: '" + func_name + "' in line : " + line);
+            }
+
             for (int i = 0; i < funcCount; i++)
                 if (funcArray[i].funcName == func_name)
                     throw runtime_error("Function: " + func_name + " already defined earlier");
@@ -326,6 +333,9 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
         else if (keyword == "call") {
             if (patchCount == MAX_PATCHES)
                 throw runtime_error("Maximum patch limit exceded");
+
+            if (func_name.empty())
+                throw runtime_error("Invalid function call on line: " + line);
 
             patches[patchCount++] = PendingPatch{ offset + 8 + 4 + 5, func_name };
             // 8 bytes for offset, 4 for size, 5 for 'call '
@@ -450,6 +460,8 @@ int getValue(Frame& f, const string& text) {
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
     FILE* fin = fopen(resolveBinPath, "rb");
+    if (!fin)
+        throw runtime_error("Can not open resolve.bin");
     fseek(fin, mainOffset, 0);
     Stack<Frame> callStack;
     vector<string> references[MAX_STACK_DEPTH];
@@ -477,6 +489,9 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             Variable* var = getVariable(current_frame, tokens[1].text);
 
             if (keyword == "set") {
+                if (tokens[1].text.empty() || !isalpha(tokens[1].text[0])) {
+                    throw runtime_error("Illegal Variable name: '" + tokens[1].text + "' in line : " + line);
+                }
                 if (var == nullptr) {
                     if (current_frame.localCount == MAX_VARS_PER_FRAME) {
                         throw runtime_error("Maximum local variable limit exceeded in function: " + current_frame.func_name);
@@ -488,7 +503,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             }
             else {
                 if (var == nullptr)
-                    throw runtime_error("Undefined Variable: " + tokens[1].text + " used in line: " + line);
+                    throw runtime_error("Undefined Variable: '" + tokens[1].text + "' used in line: " + line);
                 if (keyword == "add")
                     var->value += val;
                 else if (keyword == "sub")
@@ -602,13 +617,14 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     // after timeline add the index array i the file
     // update the header
 }
+
 // main section
 int32_t main()
 {
     try {
         if (!validateProgram("source.bin"))
         {
-            // send an error response instead of a .tdbg file
+            cout << "Error: Invalid function Structure.";
             return 1;
         }
 
@@ -618,6 +634,7 @@ int32_t main()
         executeProgram("resolve.bin", mainOffset, timeline);
 
         writeTdbg(timeline, "session.tdbg");
+
     }
     catch (exception& e) {
         cerr << "Error : " << e.what();
