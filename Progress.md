@@ -23,4 +23,8 @@ October 9 2026:
             Executed the code and resolved compiler errors
             Added try catch to main()
 
-            Next goal: write a function to display the .tdbg file 
+October 14 2026:
+
+            Added function and variable name checks
+            Added a source.bin to the repo
+            Added failed to open file checks
