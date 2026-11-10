@@ -14,11 +14,14 @@
 #include <fstream>
 #include <stdexcept>
 #include <cctype>
-//#include <unistd.h>
-//#include <sys/socket.h>
-#include <cstdint>
+#include <unistd.h>
+#include <sys/socket.h>
 #include <cstdio>
-#include<vector>
+#include <vector>
+#include <cstdlib>
+#include <signal.h>
+#include <netinet/in.h>
+#include "helper.h"
 using namespace std;
 
 // ---- Constants ----
@@ -30,6 +33,9 @@ const int32_t MAX_PATCHES = MAX_FUNCS * 4;
 const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
 const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
 const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a deadclient can't hang the server forever
+
+sig_atomic_t g_running = 1;
+void handle_sigint(int sig) { (void)sig; g_running = 0; }
 
 // ---- Custom data structures
 
@@ -190,16 +196,16 @@ void writeHeader(FILE* f, const TTDBHeader& h)
 }
 
 // resolve.bin - bookkeeping
-struct FuncEntry
-{
-    string funcName;
-    int64_t byteOffsetInResolveBin; // where this function's FUNC header record sits
-};
-struct PendingPatch
-{
-    int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
-    string targetFuncName;
-};
+//struct FuncEntry
+//{
+//    string funcName;
+//    int64_t byteOffsetInResolveBin; // where this function's FUNC header record sits
+//};
+//struct PendingPatch
+//{
+//    int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
+//    string targetFuncName;
+//};
 
 
 
@@ -618,27 +624,211 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     // update the header
 }
 
-// main section
-int32_t main()
+// Network Operations & Protocol Helpers
+
+bool sendAll(int sock, const char* buf, size_t n)
 {
-    try {
-        if (!validateProgram("source.bin"))
-        {
-            cout << "Error: Invalid function Structure.";
-            return 1;
+    size_t sent = 0;
+    while (sent < n) {
+        ssize_t r = send(sock, buf + sent, n - sent, MSG_NOSIGNAL);
+        if (r <= 0) return false;
+        sent += (size_t)r;
+    }
+    return true;
+}
+
+bool sendResponseError(int sock, const string& msg)
+{
+    Crc32 crc;
+    char status = 1;
+    crc.update(&status, 1);
+    if (!sendAll(sock, &status, 1)) return false;
+
+    crc.update(msg.data(), msg.size());
+    if (!sendAll(sock, msg.data(), msg.size())) return false;
+
+    unsigned char trailer[4];
+    crcToBytes(crc.value(), trailer);
+    return sendAll(sock, (const char*)trailer, 4);
+}
+
+bool sendResponseSuccess(int sock, const char* tdbgPath)
+{
+    FILE* f = fopen(tdbgPath, "rb");
+    if (!f) return false;
+
+    Crc32 crc;
+    char status = 0;
+    crc.update(&status, 1);
+    if (!sendAll(sock, &status, 1)) {
+        fclose(f);
+        return false;
+    }
+
+    char buf[IO_BUFFER_SIZE];
+    bool ok = true;
+    while (ok) {
+        size_t n = fread(buf, 1, sizeof(buf), f);
+        if (n == 0) break;
+        crc.update(buf, n);
+        ok = sendAll(sock, buf, n);
+    }
+    if (ferror(f)) ok = false;
+    fclose(f);
+
+    if (ok) {
+        unsigned char trailer[4];
+        crcToBytes(crc.value(), trailer);
+        ok = sendAll(sock, (const char*)trailer, 4);
+    }
+    return ok;
+}
+
+bool receiveUpload(int sock, const char* outPath, string& outError)
+{
+    TrailerChecker checker;
+    FILE* out = fopen(outPath, "wb");
+    if (!out) {
+        outError = "Cannot write source.bin file";
+        return false;
+    }
+
+    char buf[IO_BUFFER_SIZE];
+    int statusByte = -1;
+    bool writeFailed = false;
+    bool uploadFinished = false;
+
+    while (true) {
+        ssize_t r = recv(sock, buf, sizeof(buf), 0);
+        if (r < 0) {
+            outError = "Connection lost or timed out while receiving upload";
+            break;
+        }
+        if (r == 0) {
+            uploadFinished = true;
+            break;
         }
 
-        int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
+        string data = checker.feed(buf, (size_t)r);
+        size_t start = 0;
+        if (statusByte < 0 && !data.empty()) {
+            statusByte = (unsigned char)data[0];
+            start = 1;
+        }
 
-        Timeline timeline;
-        executeProgram("resolve.bin", mainOffset, timeline);
-
-        writeTdbg(timeline, "session.tdbg");
-
+        if (start < data.size()) {
+            size_t len = data.size() - start;
+            if (fwrite(data.data() + start, 1, len, out) != len) {
+                writeFailed = true;
+                outError = "Cannot write source.bin file";
+                break;
+            }
+        }
     }
-    catch (exception& e) {
-        cerr << "Error : " << e.what();
+    fclose(out);
+
+    if (writeFailed || !uploadFinished) {
+        remove(outPath);
+        return false;
+    }
+
+    if (statusByte != 0) {
+        outError = "Invalid upload status byte";
+        remove(outPath);
+        return false;
+    }
+
+    if (!checker.verify()) {
+        outError = "Upload checksum mismatch";
+        remove(outPath);
+        return false;
+    }
+
+    return true;
+}
+
+// main section
+
+int main(int argc, char* argv[])
+{
+    signal(SIGINT, handle_sigint);
+    signal(SIGPIPE, SIG_IGN);
+
+    int port = 5001;
+    if (argc >= 2) port = atoi(argv[1]);
+
+    int listenSock = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSock < 0) {
+        cerr << "Failed to create socket" << endl;
         return 1;
     }
+
+    int yes = 1;
+    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (bind(listenSock, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        cerr << "Bind failed on port " << port << endl;
+        close(listenSock);
+        return 1;
+    }
+
+    if (listen(listenSock, 16) < 0) {
+        cerr << "Listen failed" << endl;
+        close(listenSock);
+        return 1;
+    }
+
+    cout << "Server listening on port " << port << endl;
+
+    while (g_running) {
+        sockaddr_in clientAddr{};
+        socklen_t clientLen = sizeof(clientAddr);
+        int clientSock = accept(listenSock, (sockaddr*)&clientAddr, &clientLen);
+        if (clientSock < 0) {
+            if (!g_running) break;
+            continue;
+        }
+
+        timeval tv{};
+        tv.tv_sec = SOCKET_TIMEOUT_SEC;
+        setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(clientSock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        string uploadError;
+        if (!receiveUpload(clientSock, "source.bin", uploadError)) {
+            sendResponseError(clientSock, uploadError);
+            close(clientSock);
+            continue;
+        }
+
+        try {
+            if (!validateProgram("source.bin")) {
+                sendResponseError(clientSock, "Error: Invalid function Structure.");
+                close(clientSock);
+                continue;
+            }
+
+            int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
+
+            Timeline timeline;
+            executeProgram("resolve.bin", mainOffset, timeline);
+
+            writeTdbg(timeline, "session.tdbg");
+
+            sendResponseSuccess(clientSock, "session.tdbg");
+        }
+        catch (const exception& e) {
+            sendResponseError(clientSock, string("Error: ") + e.what());
+        }
+
+        close(clientSock);
+    }
+
+    close(listenSock);
     return 0;
 }
